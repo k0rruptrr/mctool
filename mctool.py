@@ -645,8 +645,14 @@ class TUI:
         
         try:
             value = self.stdscr.getstr(start_y + 2, start_x + 2 + len(prompt) + 2, 30)
-            value = value.decode('utf-8').strip()
+            # Handle potential encoding issues gracefully
+            try:
+                value = value.decode('utf-8').strip()
+            except UnicodeDecodeError:
+                value = value.decode('latin-1').strip()
             return value if value else default
+        except Exception:
+            return default
         finally:
             curses.noecho()
             curses.curs_set(0)
