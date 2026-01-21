@@ -22,8 +22,8 @@
 
 ```bash
 git clone https://github.com/youruser/phantom_mc.git
-cd phantom_mc
-chmod +x mctool.py
+cd mctool
+chmod +x mctool
 ./mctool.py
 ```
 
