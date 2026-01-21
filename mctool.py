@@ -270,12 +270,12 @@ class MinecraftServer:
         
         ram_gb = self.config.get("ram_gb", 4)
         
+        # Build the java command
+        java_cmd = f"cd {self.server_dir} && java -Xmx{ram_gb}G -Xms{ram_gb}G -jar server.jar nogui"
+        
         try:
             subprocess.run(
-                ["screen", "-dmS", SCREEN_SESSION_NAME, 
-                 "java", f"-Xmx{ram_gb}G", f"-Xms{ram_gb}G", 
-                 "-jar", "server.jar", "nogui"],
-                cwd=self.server_dir,
+                ["screen", "-dmS", SCREEN_SESSION_NAME, "bash", "-c", java_cmd],
                 check=True
             )
             return True, "Server started successfully!"
