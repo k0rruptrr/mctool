@@ -1,0 +1,13 @@
+# mctool.py has NO pip dependencies - stdlib only!
+#
+# System requirements (install via apt/yum/pacman):
+# - Python 3.8+
+# - screen
+# - openjdk-21-jre-headless (or any Java 17+)
+#
+# Optional for Windows development (not recommended for production):
+# windows-curses
+
+# Dev dependencies for testing
+# (tests use only stdlib unittest, but pytest is nicer)
+pytest>=7.0.0
