@@ -270,15 +270,37 @@ class MinecraftServer:
         
         ram_gb = self.config.get("ram_gb", 4)
         
-        # Build the java command
-        java_cmd = f"cd {self.server_dir} && java -Xmx{ram_gb}G -Xms{ram_gb}G -jar server.jar nogui"
+        # Build the java command with output logging
+        log_file = os.path.join(self.server_dir, "server.log")
+        java_cmd = f"java -Xmx{ram_gb}G -Xms{ram_gb}G -jar server.jar nogui 2>&1 | tee -a {log_file}"
         
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["screen", "-dmS", SCREEN_SESSION_NAME, "bash", "-c", java_cmd],
-                check=True
+                cwd=self.server_dir,
+                capture_output=True,
+                text=True
             )
-            return True, "Server started successfully!"
+            
+            if result.returncode != 0:
+                return False, f"Screen failed: {result.stderr}"
+            
+            # Give it a moment to start
+            time.sleep(1)
+            
+            # Check if it's actually running
+            if self.is_running():
+                return True, "Server started successfully!"
+            else:
+                # Try to read the log for errors
+                if os.path.exists(log_file):
+                    with open(log_file, 'r') as f:
+                        last_lines = f.readlines()[-10:]
+                        log_tail = ''.join(last_lines)
+                        if log_tail.strip():
+                            return False, f"Server exited. Log:\n{log_tail}"
+                return False, "Server started but exited immediately. Check Java installation."
+                
         except subprocess.CalledProcessError as e:
             return False, f"Failed to start server: {e}"
         except FileNotFoundError:
@@ -1103,6 +1125,29 @@ def cli_main(args: argparse.Namespace) -> int:
 # Entry Point
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def check_requirements() -> Tuple[bool, List[str]]:
+    """Check if required system dependencies are installed"""
+    missing = []
+    
+    # Check for screen
+    try:
+        result = subprocess.run(["screen", "--version"], capture_output=True, text=True)
+        if result.returncode != 0:
+            missing.append("screen")
+    except FileNotFoundError:
+        missing.append("screen")
+    
+    # Check for java
+    try:
+        result = subprocess.run(["java", "-version"], capture_output=True, text=True)
+        if result.returncode != 0:
+            missing.append("java")
+    except FileNotFoundError:
+        missing.append("java")
+    
+    return len(missing) == 0, missing
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Minecraft Server Manager TUI",
@@ -1123,8 +1168,23 @@ Examples:
     parser.add_argument("--status", action="store_true", help="Show server status")
     parser.add_argument("--backup", action="store_true", help="Create world backup")
     parser.add_argument("-c", "--command", type=str, help="Send command to server")
+    parser.add_argument("--skip-checks", action="store_true", help="Skip dependency checks")
     
     args = parser.parse_args()
+    
+    # Check requirements (unless skipped or just checking status)
+    if not args.skip_checks and not args.status:
+        ok, missing = check_requirements()
+        if not ok:
+            print("❌ Missing required dependencies:")
+            for dep in missing:
+                if dep == "screen":
+                    print(f"  • {dep} — install with: sudo apt install screen")
+                elif dep == "java":
+                    print(f"  • {dep} — install with: sudo apt install openjdk-21-jre-headless")
+            print("\nInstall missing dependencies and try again.")
+            print("Or use --skip-checks to bypass (not recommended).")
+            return 1
     
     # If any CLI args, run in CLI mode
     if args.start or args.stop or args.status or args.backup or args.command:
