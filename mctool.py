@@ -313,17 +313,19 @@ class MinecraftServer:
         
         try:
             if graceful:
-                # Send stop command to server
+                # Send stop command to server via screen
+                # -p 0 selects window 0, -X stuff sends keystrokes
                 subprocess.run(
-                    ["screen", "-S", SCREEN_SESSION_NAME, "-X", "stuff", "stop\n"],
-                    check=True
+                    ["screen", "-S", SCREEN_SESSION_NAME, "-p", "0", "-X", "stuff", "stop\n"],
+                    check=True,
+                    capture_output=True
                 )
                 # Wait for server to stop
-                for _ in range(30):
+                for i in range(30):
                     time.sleep(1)
                     if not self.is_running():
                         return True, "Server stopped gracefully"
-                return False, "Server did not stop in time"
+                return False, "Server did not stop in time (30s timeout)"
             else:
                 subprocess.run(
                     ["screen", "-S", SCREEN_SESSION_NAME, "-X", "quit"],
@@ -914,6 +916,185 @@ class TUI:
             color = self.COLOR_GREEN if success else self.COLOR_RED
             self.show_message("Command", message, color)
     
+    def handle_console(self) -> None:
+        """Interactive console with live log output and command input"""
+        log_file = os.path.join(self.server.server_dir, "server.log")
+        
+        height, width = self.stdscr.getmaxyx()
+        
+        # Calculate box dimensions
+        box_w = min(width - 4, 100)
+        box_h = min(height - 4, 30)
+        start_y = 1
+        start_x = (width - box_w) // 2
+        visible_lines = box_h - 7  # Room for header, separator, input area
+        
+        scroll_offset = 0
+        auto_scroll = True
+        command_buffer = ""
+        cursor_pos = 0
+        
+        # Get command history
+        history = self.config.get("command_history", [])
+        history_idx = -1
+        
+        # Non-blocking input with shorter timeout
+        self.stdscr.nodelay(True)
+        self.stdscr.timeout(200)  # 200ms refresh
+        
+        try:
+            while True:
+                # Read log file
+                lines = []
+                if os.path.exists(log_file):
+                    try:
+                        with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
+                            lines = f.readlines()
+                    except IOError:
+                        pass
+                
+                # Clean lines - strip ANSI escape codes and truncate
+                import re
+                ansi_escape = re.compile(r'\x1b\[[0-9;]*m|\x1b\[[0-9;]*[A-Za-z]')
+                lines = [ansi_escape.sub('', l).rstrip()[:box_w - 4] for l in lines]
+                
+                # Auto-scroll to bottom
+                if auto_scroll:
+                    scroll_offset = max(0, len(lines) - visible_lines)
+                
+                # Draw
+                self.stdscr.clear()
+                self.draw_box(start_y, start_x, box_h, box_w, "Server Console")
+                
+                # Status bar inside box
+                running = self.server.is_running()
+                status_str = "● LIVE" if running else "○ STOPPED"
+                status_color = self.COLOR_GREEN if running else self.COLOR_RED
+                self.stdscr.addstr(start_y + 1, start_x + 2, status_str, status_color | curses.A_BOLD)
+                
+                auto_str = "[A]uto-scroll: " + ("ON" if auto_scroll else "OFF")
+                self.stdscr.addstr(start_y + 1, start_x + box_w - len(auto_str) - 2, auto_str, 
+                                  self.COLOR_CYAN if auto_scroll else self.COLOR_YELLOW)
+                
+                self.draw_separator(start_y + 2, start_x, box_w)
+                
+                # Log lines
+                for i in range(visible_lines):
+                    line_idx = scroll_offset + i
+                    if line_idx >= len(lines):
+                        break
+                    
+                    line = lines[line_idx]
+                    y = start_y + 3 + i
+                    
+                    # Color based on content
+                    if "ERROR" in line or "Exception" in line:
+                        color = self.COLOR_RED
+                    elif "WARN" in line:
+                        color = self.COLOR_YELLOW
+                    elif "INFO" in line:
+                        color = self.COLOR_CYAN
+                    else:
+                        color = curses.A_NORMAL
+                    
+                    try:
+                        self.stdscr.addstr(y, start_x + 2, line[:box_w - 4], color)
+                    except curses.error:
+                        pass
+                
+                # Command input area
+                input_y = start_y + box_h - 3
+                self.draw_separator(input_y, start_x, box_w)
+                
+                # Command prompt
+                prompt = "> "
+                self.stdscr.addstr(input_y + 1, start_x + 2, prompt, self.COLOR_GREEN | curses.A_BOLD)
+                
+                # Command buffer (show what user is typing)
+                display_cmd = command_buffer[:box_w - 6]
+                self.stdscr.addstr(input_y + 1, start_x + 2 + len(prompt), display_cmd)
+                
+                # Cursor position
+                cursor_x = start_x + 2 + len(prompt) + min(cursor_pos, len(display_cmd))
+                
+                # Footer hints
+                hint = "Enter: Send  ↑↓: History  Esc: Back"
+                self.stdscr.addstr(height - 1, (width - len(hint)) // 2, hint, self.COLOR_CYAN)
+                
+                # Show cursor
+                try:
+                    self.stdscr.move(input_y + 1, cursor_x)
+                    curses.curs_set(1)
+                except curses.error:
+                    pass
+                
+                self.stdscr.refresh()
+                
+                # Handle input
+                key = self.stdscr.getch()
+                
+                if key == 27:  # Escape
+                    break
+                elif key == curses.KEY_ENTER or key == 10 or key == 13:
+                    # Send command
+                    if command_buffer.strip():
+                        if running:
+                            self.server.send_command(command_buffer.strip())
+                        command_buffer = ""
+                        cursor_pos = 0
+                        history_idx = -1
+                        auto_scroll = True
+                elif key == curses.KEY_UP:
+                    # History up
+                    if history and history_idx < len(history) - 1:
+                        history_idx += 1
+                        command_buffer = history[history_idx]
+                        cursor_pos = len(command_buffer)
+                elif key == curses.KEY_DOWN:
+                    # History down
+                    if history_idx > 0:
+                        history_idx -= 1
+                        command_buffer = history[history_idx]
+                        cursor_pos = len(command_buffer)
+                    elif history_idx == 0:
+                        history_idx = -1
+                        command_buffer = ""
+                        cursor_pos = 0
+                elif key == curses.KEY_BACKSPACE or key == 127 or key == 8:
+                    # Backspace
+                    if cursor_pos > 0:
+                        command_buffer = command_buffer[:cursor_pos-1] + command_buffer[cursor_pos:]
+                        cursor_pos -= 1
+                elif key == curses.KEY_LEFT:
+                    if cursor_pos > 0:
+                        cursor_pos -= 1
+                elif key == curses.KEY_RIGHT:
+                    if cursor_pos < len(command_buffer):
+                        cursor_pos += 1
+                elif key == curses.KEY_PPAGE:  # Page Up - scroll log
+                    auto_scroll = False
+                    scroll_offset = max(0, scroll_offset - visible_lines)
+                elif key == curses.KEY_NPAGE:  # Page Down - scroll log
+                    scroll_offset = min(max(0, len(lines) - visible_lines), scroll_offset + visible_lines)
+                    if scroll_offset >= len(lines) - visible_lines:
+                        auto_scroll = True
+                elif key == ord('a') or key == ord('A'):
+                    # Toggle auto-scroll only if not typing
+                    if not command_buffer:
+                        auto_scroll = not auto_scroll
+                    else:
+                        command_buffer = command_buffer[:cursor_pos] + chr(key) + command_buffer[cursor_pos:]
+                        cursor_pos += 1
+                elif 32 <= key <= 126:  # Printable ASCII
+                    command_buffer = command_buffer[:cursor_pos] + chr(key) + command_buffer[cursor_pos:]
+                    cursor_pos += 1
+                    history_idx = -1
+                
+        finally:
+            self.stdscr.nodelay(False)
+            self.stdscr.timeout(-1)
+            curses.curs_set(0)
+    
     def handle_version_change(self) -> None:
         """Handle version change"""
         current = self.config.get("current_version", "Not installed")
@@ -1059,6 +1240,7 @@ class TUI:
                 "Stop Server",
                 f"Server Status  [{status_indicator}]",
                 "Execute Command",
+                "View Console",
                 "Change Version",
                 "Backup Worlds",
                 "Settings",
@@ -1067,7 +1249,7 @@ class TUI:
             
             result = self.show_menu("🎮 Minecraft Server Manager", options)
             
-            if result == -1 or result == 8:
+            if result == -1 or result == 9:
                 break
             elif result == 0:
                 self.handle_install()
@@ -1080,10 +1262,12 @@ class TUI:
             elif result == 4:
                 self.handle_command()
             elif result == 5:
-                self.handle_version_change()
+                self.handle_console()
             elif result == 6:
-                self.handle_backup()
+                self.handle_version_change()
             elif result == 7:
+                self.handle_backup()
+            elif result == 8:
                 self.handle_settings()
 
 
