@@ -28,7 +28,25 @@ MANIFEST_URL = "https://launchermeta.mojang.com/mc/game/version_manifest.json"
 PAPER_API_URL = "https://api.papermc.io/v2/projects/paper"
 DEFAULT_SERVER_DIR = os.path.expanduser("~/minecraft")
 CONFIG_FILENAME = ".mctool.json"
-SCREEN_SESSION_NAME = "minecraft"
+
+
+def generate_session_name(server_dir: str) -> str:
+    """Generate a unique screen session name from server directory"""
+    # Use last component of path, sanitized for screen
+    base = os.path.basename(os.path.normpath(server_dir)) or "minecraft"
+    # Remove any non-alphanumeric chars except underscore/hyphen
+    sanitized = ''.join(c if c.isalnum() or c in '-_' else '_' for c in base)
+    return f"mc_{sanitized}"[:32]  # Screen session names have limits
+
+
+def sanitize_path(path: str) -> str:
+    """Sanitize a path string to prevent shell injection"""
+    # Remove any shell metacharacters
+    dangerous = ['$', '`', '|', '&', ';', '>', '<', '(', ')', '{', '}', '[', ']', '!', '\n', '\r']
+    result = path
+    for char in dangerous:
+        result = result.replace(char, '')
+    return result.strip()
 
 
 class Config:
@@ -38,11 +56,13 @@ class Config:
         self.server_dir = server_dir
         self.config_path = os.path.join(server_dir, CONFIG_FILENAME)
         self.data = self._load()
+        self._validate()
     
     def _default_config(self) -> Dict[str, Any]:
         return {
             "server_dir": self.server_dir,
             "ram_gb": 4,
+            "java_path": "java",
             "current_version": None,
             "server_type": "vanilla",
             "auto_backup": True,
@@ -63,6 +83,43 @@ class Config:
                 pass
         return self._default_config()
     
+    def _validate(self) -> None:
+        """Validate and sanitize config values"""
+        # Validate ram_gb
+        try:
+            ram = int(self.data.get("ram_gb", 4))
+            ram = max(1, min(64, ram))  # Clamp to 1-64
+            self.data["ram_gb"] = ram
+        except (ValueError, TypeError):
+            self.data["ram_gb"] = 4
+        
+        # Validate max_backups
+        try:
+            max_b = int(self.data.get("max_backups", 5))
+            max_b = max(1, min(100, max_b))  # Clamp to 1-100
+            self.data["max_backups"] = max_b
+        except (ValueError, TypeError):
+            self.data["max_backups"] = 5
+        
+        # Sanitize java_path
+        java_path = self.data.get("java_path", "java")
+        if not isinstance(java_path, str) or not java_path.strip():
+            java_path = "java"
+        self.data["java_path"] = sanitize_path(java_path)
+        
+        # Sanitize server_dir
+        server_dir = self.data.get("server_dir", self.server_dir)
+        if isinstance(server_dir, str):
+            self.data["server_dir"] = sanitize_path(server_dir)
+        
+        # Validate server_type
+        if self.data.get("server_type") not in ("vanilla", "paper"):
+            self.data["server_type"] = "vanilla"
+        
+        # Ensure command_history is a list
+        if not isinstance(self.data.get("command_history"), list):
+            self.data["command_history"] = []
+    
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
         with open(self.config_path, 'w') as f:
@@ -73,7 +130,12 @@ class Config:
     
     def set(self, key: str, value: Any) -> None:
         self.data[key] = value
+        self._validate()  # Re-validate after setting
         self.save()
+    
+    def get_session_name(self) -> str:
+        """Get the screen session name for this server"""
+        return generate_session_name(self.data.get("server_dir", self.server_dir))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -250,14 +312,27 @@ class MinecraftServer:
     
     def is_running(self) -> bool:
         """Check if server is running in screen session"""
+        session_name = self.config.get_session_name()
         try:
             result = subprocess.run(
-                ["screen", "-ls", SCREEN_SESSION_NAME],
+                ["screen", "-ls"],
                 capture_output=True, text=True
             )
-            return SCREEN_SESSION_NAME in result.stdout
+            return session_name in result.stdout
         except FileNotFoundError:
             return False
+    
+    def _validate_java(self) -> Tuple[bool, str]:
+        """Check if java binary exists and is executable"""
+        java_path = self.config.get("java_path", "java")
+        try:
+            result = subprocess.run(
+                [java_path, "-version"],
+                capture_output=True, text=True
+            )
+            return result.returncode == 0, java_path
+        except FileNotFoundError:
+            return False, java_path
     
     def start(self) -> Tuple[bool, str]:
         """Start the server in a screen session"""
@@ -268,15 +343,21 @@ class MinecraftServer:
         if not os.path.exists(jar_path):
             return False, "server.jar not found. Please install first."
         
+        # Validate java
+        java_ok, java_path = self._validate_java()
+        if not java_ok:
+            return False, f"Java not found at '{java_path}'. Check java_path config."
+        
         ram_gb = self.config.get("ram_gb", 4)
+        session_name = self.config.get_session_name()
         
         # Build the java command with output logging
         log_file = os.path.join(self.server_dir, "server.log")
-        java_cmd = f"java -Xmx{ram_gb}G -Xms{ram_gb}G -jar server.jar nogui 2>&1 | tee -a {log_file}"
+        java_cmd = f"{java_path} -Xmx{ram_gb}G -Xms{ram_gb}G -jar server.jar nogui 2>&1 | tee -a {log_file}"
         
         try:
             result = subprocess.run(
-                ["screen", "-dmS", SCREEN_SESSION_NAME, "bash", "-c", java_cmd],
+                ["screen", "-dmS", session_name, "bash", "-c", java_cmd],
                 cwd=self.server_dir,
                 capture_output=True,
                 text=True
@@ -311,12 +392,14 @@ class MinecraftServer:
         if not self.is_running():
             return False, "Server is not running"
         
+        session_name = self.config.get_session_name()
+        
         try:
             if graceful:
                 # Send stop command to server via screen
                 # -p 0 selects window 0, -X stuff sends keystrokes
                 subprocess.run(
-                    ["screen", "-S", SCREEN_SESSION_NAME, "-p", "0", "-X", "stuff", "stop\n"],
+                    ["screen", "-S", session_name, "-p", "0", "-X", "stuff", "stop\n"],
                     check=True,
                     capture_output=True
                 )
@@ -328,7 +411,7 @@ class MinecraftServer:
                 return False, "Server did not stop in time (30s timeout)"
             else:
                 subprocess.run(
-                    ["screen", "-S", SCREEN_SESSION_NAME, "-X", "quit"],
+                    ["screen", "-S", session_name, "-X", "quit"],
                     check=True
                 )
                 return True, "Server terminated"
@@ -340,9 +423,13 @@ class MinecraftServer:
         if not self.is_running():
             return False, "Server is not running"
         
+        session_name = self.config.get_session_name()
+        # Sanitize command to prevent injection
+        safe_command = command.replace('\n', ' ').replace('\r', '')
+        
         try:
             subprocess.run(
-                ["screen", "-S", SCREEN_SESSION_NAME, "-X", "stuff", f"{command}\n"],
+                ["screen", "-S", session_name, "-p", "0", "-X", "stuff", f"{safe_command}\n"],
                 check=True
             )
             # Save to history
@@ -1315,7 +1402,7 @@ def cli_main(args: argparse.Namespace) -> int:
 # Entry Point
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def check_requirements() -> Tuple[bool, List[str]]:
+def check_requirements(java_path: str = "java") -> Tuple[bool, List[str]]:
     """Check if required system dependencies are installed"""
     missing = []
     
@@ -1327,13 +1414,13 @@ def check_requirements() -> Tuple[bool, List[str]]:
     except FileNotFoundError:
         missing.append("screen")
     
-    # Check for java
+    # Check for java (use provided path or default)
     try:
-        result = subprocess.run(["java", "-version"], capture_output=True, text=True)
+        result = subprocess.run([java_path, "-version"], capture_output=True, text=True)
         if result.returncode != 0:
-            missing.append("java")
+            missing.append(f"java ({java_path})")
     except FileNotFoundError:
-        missing.append("java")
+        missing.append(f"java ({java_path})")
     
     return len(missing) == 0, missing
 
@@ -1362,16 +1449,21 @@ Examples:
     
     args = parser.parse_args()
     
+    # Load config to get java_path
+    config = Config()
+    java_path = config.get("java_path", "java")
+    
     # Check requirements (unless skipped or just checking status)
     if not args.skip_checks and not args.status:
-        ok, missing = check_requirements()
+        ok, missing = check_requirements(java_path)
         if not ok:
             print("❌ Missing required dependencies:")
             for dep in missing:
-                if dep == "screen":
+                if "screen" in dep:
                     print(f"  • {dep} — install with: sudo apt install screen")
-                elif dep == "java":
+                elif "java" in dep:
                     print(f"  • {dep} — install with: sudo apt install openjdk-21-jre-headless")
+                    print(f"         Or set java_path in {config.config_path}")
             print("\nInstall missing dependencies and try again.")
             print("Or use --skip-checks to bypass (not recommended).")
             return 1

@@ -184,7 +184,6 @@ class TestMinecraftServerVersionFetching(unittest.TestCase):
         
         self.assertIsNone(url)
 
-
 class TestMinecraftServerProcessControl(unittest.TestCase):
     """Tests for server start/stop/status"""
     
@@ -192,6 +191,7 @@ class TestMinecraftServerProcessControl(unittest.TestCase):
         self.test_dir = tempfile.mkdtemp()
         self.config = Config(self.test_dir)
         self.server = MinecraftServer(self.config)
+        self.session_name = self.config.get_session_name()  # Dynamic session name
     
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
@@ -200,7 +200,7 @@ class TestMinecraftServerProcessControl(unittest.TestCase):
     def test_is_running_true(self, mock_run):
         """Should detect running server from screen -ls output"""
         mock_run.return_value = MagicMock(
-            stdout="There is a screen on:\n\t12345.minecraft\t(Detached)\n"
+            stdout=f"There is a screen on:\n\t12345.{self.session_name}\t(Detached)\n"
         )
         
         self.assertTrue(self.server.is_running())
@@ -234,8 +234,8 @@ class TestMinecraftServerProcessControl(unittest.TestCase):
         jar_path = os.path.join(self.test_dir, "server.jar")
         open(jar_path, 'w').close()
         
-        # Mock is_running to return True
-        mock_run.return_value = MagicMock(stdout="12345.minecraft")
+        # Mock is_running to return True (session name in output)
+        mock_run.return_value = MagicMock(stdout=f"12345.{self.session_name}")
         
         success, msg = self.server.start()
         
@@ -249,23 +249,27 @@ class TestMinecraftServerProcessControl(unittest.TestCase):
         jar_path = os.path.join(self.test_dir, "server.jar")
         open(jar_path, 'w').close()
         
-        # First call is is_running check (return not running)
-        # Second call is the actual start
+        # First call: screen -ls (not running)
+        # Second call: java -version (validate java)
+        # Third call: screen start
+        # Fourth call: screen -ls (running now)
         mock_run.side_effect = [
             MagicMock(stdout="No Sockets found"),  # is_running check
-            MagicMock()  # start command
+            MagicMock(returncode=0),  # java -version
+            MagicMock(returncode=0),  # start command
+            MagicMock(stdout=f"12345.{self.session_name}"),  # is_running after start
         ]
         
         success, msg = self.server.start()
         
         self.assertTrue(success)
         
-        # Verify screen command was called correctly
-        start_call = mock_run.call_args_list[1]
+        # Verify screen command was called correctly (3rd call)
+        start_call = mock_run.call_args_list[2]
         cmd = start_call[0][0]
         self.assertIn("screen", cmd)
         self.assertIn("-dmS", cmd)
-        self.assertIn("minecraft", cmd)
+        self.assertIn(self.session_name, cmd)
     
     @patch('subprocess.run')
     def test_stop_not_running(self, mock_run):
@@ -280,7 +284,8 @@ class TestMinecraftServerProcessControl(unittest.TestCase):
     @patch('subprocess.run')
     def test_send_command_saves_history(self, mock_run):
         """Should save commands to history"""
-        mock_run.return_value = MagicMock(stdout="12345.minecraft")
+        # is_running check returns True
+        mock_run.return_value = MagicMock(stdout=f"12345.{self.session_name}")
         
         self.server.send_command("say hello")
         
@@ -290,7 +295,7 @@ class TestMinecraftServerProcessControl(unittest.TestCase):
     @patch('subprocess.run')
     def test_send_command_history_limit(self, mock_run):
         """Should limit command history to 20 entries"""
-        mock_run.return_value = MagicMock(stdout="12345.minecraft")
+        mock_run.return_value = MagicMock(stdout=f"12345.{self.session_name}")
         
         for i in range(25):
             self.server.send_command(f"cmd{i}")
@@ -522,8 +527,9 @@ class TestEdgeCases(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = Config(tmpdir)
             server = MinecraftServer(config)
+            session_name = config.get_session_name()
             
-            mock_run.return_value = MagicMock(stdout="12345.minecraft")
+            mock_run.return_value = MagicMock(stdout=f"12345.{session_name}")
             
             server.send_command("say test")
             server.send_command("say test")
@@ -540,6 +546,7 @@ class TestGracefulStop(unittest.TestCase):
         self.test_dir = tempfile.mkdtemp()
         self.config = Config(self.test_dir)
         self.server = MinecraftServer(self.config)
+        self.session_name = self.config.get_session_name()
     
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
@@ -551,13 +558,14 @@ class TestGracefulStop(unittest.TestCase):
         # First call: is_running returns True
         # Second call: send stop command
         # Subsequent calls: is_running returns False (server stopped)
+        session_name = self.session_name
         call_count = [0]
         
         def mock_run_handler(*args, **kwargs):
             call_count[0] += 1
             result = MagicMock()
             if call_count[0] == 1:  # is_running check
-                result.stdout = "12345.minecraft"
+                result.stdout = f"12345.{session_name}"
             elif call_count[0] == 2:  # stop command
                 pass
             else:  # subsequent is_running checks
@@ -582,7 +590,7 @@ class TestGracefulStop(unittest.TestCase):
     def test_graceful_stop_timeout(self, mock_run, mock_sleep):
         """Should fail if server doesn't stop within timeout"""
         # Server always reports running
-        mock_run.return_value = MagicMock(stdout="12345.minecraft")
+        mock_run.return_value = MagicMock(stdout=f"12345.{self.session_name}")
         
         success, msg = self.server.stop(graceful=True)
         
@@ -596,7 +604,7 @@ class TestGracefulStop(unittest.TestCase):
     def test_force_stop_uses_quit(self, mock_run):
         """Force stop should use screen -X quit"""
         mock_run.side_effect = [
-            MagicMock(stdout="12345.minecraft"),  # is_running
+            MagicMock(stdout=f"12345.{self.session_name}"),  # is_running
             MagicMock()  # quit command
         ]
         
