@@ -22,8 +22,8 @@
 ## Быстрый старт
 
 ```bash
-git clone https://github.com/youruser/phantom_mc.git
-cd phantom_mc
+git clone [https://github.com/youruser/phantom_mc.git](https://github.com/k0rruptrr/mctool.git)
+cd mctool
 chmod +x mctool.py
 ./mctool.py
 ```
